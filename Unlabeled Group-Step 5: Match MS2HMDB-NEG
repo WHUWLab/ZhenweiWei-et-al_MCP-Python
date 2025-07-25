@@ -1,0 +1,101 @@
+import os
+import pandas as pd
+from lxml import etree
+from tqdm import tqdm
+
+# Path configuration (anonymized)
+csv_dir = './input/hmdb_matched_csv'
+xml_dir = './xml/msms_spectra'
+output_dir = './output/ms2_matched_results'
+os.makedirs(output_dir, exist_ok=True)
+
+# Index all negative mode XML files: HMDB_ID -> List[xml_paths]
+print("Indexing XML files...")
+hmdb_xml_map = {}
+for xml_file in tqdm(os.listdir(xml_dir)):
+    if not xml_file.endswith(".xml"):
+        continue
+    xml_path = os.path.join(xml_dir, xml_file)
+    try:
+        tree = etree.parse(xml_path)
+        root = tree.getroot()
+        db_id = root.findtext('.//database-id')
+        ion_mode = root.findtext('.//ionization-mode')
+        if db_id and ion_mode and ion_mode.strip().lower() == 'negative':
+            hmdb_xml_map.setdefault(db_id.strip(), []).append(xml_path)
+    except Exception as e:
+        print(f"Failed to parse XML: {xml_file}, Error: {e}")
+
+# Process each input CSV file
+print("Processing CSV files...")
+for csv_file in tqdm(os.listdir(csv_dir)):
+    if not csv_file.endswith(".csv"):
+        continue
+
+    csv_path = os.path.join(csv_dir, csv_file)
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Failed to read CSV: {csv_file}, Error: {e}")
+        continue
+
+    required_cols = ['FEATURE_ID', 'HMDB_ID', 'PEPMASS', 'RTINMINS', 'Formula', 'Name',
+                     'Average_Molecular_Weight', 'CAS_Registry_Number']
+    if not set(required_cols).issubset(df.columns):
+        print(f"Missing required columns in {csv_file}, skipping...")
+        continue
+
+    # Group results by collision energy
+    energy_grouped_rows = {}
+
+    for _, row in df.iterrows():
+        hmdb_id = str(row['HMDB_ID']).strip()
+        if hmdb_id not in hmdb_xml_map:
+            continue
+
+        for xml_path in hmdb_xml_map[hmdb_id]:
+            try:
+                tree = etree.parse(xml_path)
+                root = tree.getroot()
+                collision_energy = root.findtext('.//collision-energy-voltage') or 'UnknownEnergy'
+                all_peaks = []
+
+                for peak in root.findall('.//ms-ms-peak'):
+                    mz = peak.findtext('mass-charge')
+                    inten = peak.findtext('intensity')
+                    msid = peak.findtext('ms-ms-id')
+                    if mz and inten:
+                        all_peaks.append((float(mz), float(inten), msid or ""))
+
+                # Take top 30 peaks by intensity
+                all_peaks = sorted(all_peaks, key=lambda x: x[1], reverse=True)[:30]
+                if not all_peaks:
+                    continue
+
+                # Prepare output row
+                output_row = row[required_cols].to_dict()
+                output_row['Collision_Energy'] = collision_energy
+                output_row['From_CSV_File'] = csv_file
+
+                for i, (mz, inten, msid) in enumerate(all_peaks, 1):
+                    output_row[f'mz_{i}'] = mz
+                    output_row[f'intensity_{i}'] = inten
+                    output_row[f'ms-ms-id_{i}'] = msid
+
+                energy_grouped_rows.setdefault(collision_energy, []).append(output_row)
+
+            except Exception as e:
+                print(f"Error parsing XML {xml_path}, Error: {e}")
+                continue
+
+    # Write output files by collision energy
+    if energy_grouped_rows:
+        base_name = os.path.splitext(csv_file)[0]
+        for energy, rows in energy_grouped_rows.items():
+            safe_energy = energy.replace(" ", "_").replace(":", "-")
+            output_filename = f"{base_name}_MS2_MATCHED_{safe_energy}.csv"
+            output_path = os.path.join(output_dir, output_filename)
+            pd.DataFrame(rows).to_csv(output_path, index=False)
+            print(f"[Saved] {output_filename} with {len(rows)} entries")
+    else:
+        print(f"[No Match] No MS2 match found for {csv_file}")
