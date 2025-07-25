@@ -1,0 +1,113 @@
+import os
+import re
+import pandas as pd
+from tqdm import tqdm
+from pathlib import Path
+
+# Define input and output directories
+input_folder = Path("./input/mgf_files")
+output_folder = Path("./output/mgf_processed")
+output_folder.mkdir(parents=True, exist_ok=True)
+
+def parse_mgf(file_path):
+    """Parse MGF file and extract spectrum blocks with peak data."""
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
+
+    spectra = []
+    current = {}
+    in_block = False
+    in_ions = False
+
+    for line in lines:
+        line = line.strip()
+
+        if line == 'BEGIN IONS':
+            current = {"ions": []}
+            in_block = True
+            in_ions = False
+
+        elif line == 'END IONS':
+            spectra.append(current)
+            in_block = False
+            in_ions = False
+
+        elif in_block:
+            if line.startswith("MERGED_STATS="):
+                in_ions = True
+            elif in_ions and re.match(r"^\d+\.?\d*\s+[Ee\d\.\+]+$", line):
+                try:
+                    mz, intensity = map(float, line.split())
+                    current["ions"].append((mz, intensity))
+                except:
+                    continue
+            elif not in_ions and '=' in line:
+                key, value = line.split('=', 1)
+                current[key.upper()] = value
+
+    return spectra
+
+def normalize_intensities(ions):
+    """Normalize peak intensities to 0–100 scale."""
+    if not ions:
+        return []
+
+    max_intensity = max(i[1] for i in ions)
+    if max_intensity == 0:
+        return [(mz, intensity, 0.0) for mz, intensity in ions]
+
+    return [
+        (mz, intensity, round((intensity / max_intensity) * 100, 3))
+        for mz, intensity in ions
+    ]
+
+def process_spectra(spectra):
+    """Process MS2 spectra: filter ions, normalize, and output tabular records."""
+    records = []
+
+    for i, spec in enumerate(spectra):
+        if spec.get('MSLEVEL', '1') != '2':
+            continue
+
+        try:
+            pepmass = float(spec.get('PEPMASS', '0').split()[0])
+            rt = float(spec.get('RTINSECONDS', '0')) / 60  # Convert RT to minutes
+            fid = int(spec.get('FEATURE_ID', i + 1))
+
+            # Keep product ions with m/z ≤ precursor mass
+            filtered_ions = [(mz, inten) for mz, inten in spec['ions'] if mz <= pepmass]
+            normalized = normalize_intensities(filtered_ions)
+
+            # Sort by normalized intensity
+            normalized_sorted = sorted(normalized, key=lambda x: x[2], reverse=True)
+
+            # Create output record
+            record = {
+                'FEATURE_ID': fid,
+                'PEPMASS': pepmass,
+                'RTINMINS': round(rt, 3)
+            }
+
+            for idx, (mz, inten, norm) in enumerate(normalized_sorted, 1):
+                record[f'PRODMASS_{idx} m/z'] = mz
+                record[f'PRODMASS_{idx} intensity'] = inten
+                record[f'PRODMASS_{idx} NORMALIZED'] = norm
+
+            records.append(record)
+
+        except Exception as e:
+            print(f"Skipped block due to error: {e}")
+            continue
+
+    return pd.DataFrame(records)
+
+# Process all .mgf files in the input folder
+mgf_files = list(input_folder.glob("*.mgf"))
+
+for mgf_file in tqdm(mgf_files, desc="Processing MGF files"):
+    spectra = parse_mgf(mgf_file)
+    df = process_spectra(spectra)
+
+    output_path = output_folder / (mgf_file.stem + ".csv")
+    df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    print(f"Exported: {output_path}")
