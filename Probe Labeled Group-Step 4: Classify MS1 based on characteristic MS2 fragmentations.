@@ -1,0 +1,97 @@
+import pandas as pd
+import os
+from tqdm import tqdm
+
+# Initialize progress bar
+tqdm.pandas()
+
+# File paths
+input_file = "path/to/input_data.csv"
+output_folder = "path/to/output_folder"
+os.makedirs(output_folder, exist_ok=True)
+output_file = os.path.join(output_folder, "classified_results.csv")
+
+# Read input file
+print("Reading data...")
+msii_df = pd.read_csv(input_file, encoding="utf-8-sig")
+
+# Extract fragment ion columns
+mz_cols = sorted([col for col in msii_df.columns if col.startswith("m/z_")], 
+                 key=lambda x: int(x.split("_")[1]))
+intensity_cols = sorted([col for col in msii_df.columns if col.startswith("intensity_")], 
+                       key=lambda x: int(x.split("_")[1]))
+
+# Filter fragments by intensity threshold (0.1% of max)
+print("Filtering fragments...")
+def filter_fragments(row):
+    fragment_data = [(row[mz], row[intensity]) 
+                    for mz, intensity in zip(mz_cols, intensity_cols)
+                    if pd.notna(row[mz]) and pd.notna(row[intensity])]
+
+    if not fragment_data:
+        return pd.Series()
+
+    max_intensity = max(fragment_data, key=lambda x: x[1])[1]
+    threshold = max_intensity * 0.001
+    
+    filtered_fragments = [(mz, intensity) 
+                         for mz, intensity in fragment_data 
+                         if intensity >= threshold]
+    filtered_fragments.sort(key=lambda x: x[1], reverse=True)
+
+    result = {}
+    for i, (mz, intensity) in enumerate(filtered_fragments):
+        result[f"m/z_{i+1}"] = mz
+        result[f"intensity_{i+1}"] = intensity
+        
+    return pd.Series(result)
+
+filtered_fragments = msii_df.progress_apply(filter_fragments, axis=1)
+msii_df = msii_df.drop(columns=mz_cols + intensity_cols).join(filtered_fragments)
+new_mz_cols = [col for col in filtered_fragments.columns if col.startswith("m/z_")]
+
+# Classify fragments into groups
+print("Classifying fragments...")
+group_cooh = [105.0699, 122.0964, 131.0663, 149.0768, 166.1034]
+group_nh = [105.0335, 122.0600, 149.0405, 166.0670]
+group_sh = [91.0542, 135.0612, 152.0877]
+
+def classify_group_with_source(mz_values):
+    found_groups = set()
+    group_sources = set()
+
+    for mz in mz_values:
+        for target_mz in group_cooh:
+            if abs(mz - target_mz) <= 0.01:
+                found_groups.add("COOH")
+                group_sources.add(f"COOH {mz:.4f}")
+        for target_mz in group_nh:
+            if abs(mz - target_mz) <= 0.01:
+                found_groups.add("NH")
+                group_sources.add(f"NH {mz:.4f}")
+        for target_mz in group_sh:
+            if abs(mz - target_mz) <= 0.01:
+                found_groups.add("SH")
+                group_sources.add(f"SH {mz:.4f}")
+
+    return (",".join(sorted(found_groups)) if found_groups else "None", 
+            ",".join(sorted(group_sources)) if group_sources else "None"
+
+msii_df[["GROUP", "GROUP_SOURCE"]] = msii_df.progress_apply(
+    lambda row: classify_group_with_source(
+        [row[mz_col] for mz_col in new_mz_cols if pd.notna(row[mz_col])]),
+    axis=1,
+    result_type="expand"
+)
+
+# Save results
+print("Saving results...")
+main_cols = ["Precursor", "retention time", "SOURCE_ID", "Peak Height", "GROUP", "GROUP_SOURCE"]
+mz_intensity_cols = [f"(Wang, Bai et al.)_(Liu, Cai et al.)" for i in range(1, len(filtered_fragments.columns)//2 + 1) 
+
+                    for x in ("m/z", "intensity")]
+final_columns = [col for col in (main_cols + mz_intensity_cols) if col in msii_df.columns]
+msii_df = msii_df[final_columns]
+msii_df.to_csv(output_file, index=False, encoding="utf-8-sig")
+
+print(f"Processing complete. Results saved to: {output_file}")
