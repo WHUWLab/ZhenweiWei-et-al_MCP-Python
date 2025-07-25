@@ -1,0 +1,73 @@
+import pandas as pd
+import os
+import glob
+from pathlib import Path
+from tqdm import tqdm
+
+def process_data():
+"""
+Batch process multiple CSV files containing mass spectrometry data.
+Extract 'm/z', 'Retention Time', and peak intensity, merge all files,
+deduplicate based on m/z and RT, and export as a single file.
+"""
+
+# 1. Set input and output paths
+input_dir = Path("path/to/input_directory")  # Folder containing input CSV files
+output_path = Path("path/to/output/merged_spectral_data.csv")  # Path to save the merged result
+
+# 2. Locate all CSV files in the directory
+all_files = glob.glob(str(input_dir / "*.csv"))  # Match all CSV files
+dfs = []  # List to store processed DataFrames
+
+# 2.1 Iterate through each file with a progress bar
+for file in tqdm(all_files, desc="Processing files"):
+    try:
+        df = pd.read_csv(file)
+        filename = os.path.basename(file)  # Extract filename from path
+
+        # 2.2 Automatically detect the peak intensity column (supports flexible naming)
+        peak_col = next((col for col in df.columns
+                        if any(kw in col.lower() for kw in ["height", "intensity"])), None)
+
+        if not peak_col:
+            print(f"Skipping {filename}: No peak intensity column found")
+            continue  # Skip files without a valid intensity column
+
+        # 2.3 Extract required columns and standardize column names
+        processed = df[["row m/z", "row retention time", peak_col]].copy()
+        processed["Source File"] = filename  # Add source file info for traceability
+
+        processed.rename(columns={
+            peak_col: "Peak Height",
+            "row m/z": "m/z",
+            "row retention time": "Retention Time"
+        }, inplace=True)
+
+        dfs.append(processed)
+
+    except Exception as e:
+        print(f"Error processing {filename}: {str(e)}")
+        continue  # Skip files with errors to avoid interrupting the loop
+
+if not dfs:
+    return "Error: No valid files were processed"
+
+# 3. Merge all DataFrames
+merged = pd.concat(dfs, ignore_index=True)
+
+# 3.1 Group by m/z and Retention Time with small tolerance for measurement errors
+merged["mz_group"] = merged["m/z"].round(3)  # Tolerance: ±0.001 for m/z
+merged["rt_group"] = merged["Retention Time"].round(1)  # Tolerance: ±0.1 min for RT
+
+# 3.2 Keep only the record with the highest peak in each (m/z, RT) group
+dedup = merged.sort_values("Peak Height", ascending=False
+                         ).drop_duplicates(["mz_group", "rt_group"], keep="first")
+
+# 4. Save the final result
+dedup.drop(columns=["mz_group", "rt_group"], inplace=True)  # Drop grouping columns
+dedup.sort_values(["m/z", "Retention Time"], inplace=True)  # Sort for better readability
+dedup.to_csv(output_path, index=False)  # Export to CSV
+
+return f"Processing complete! Results saved to: {output_path}"
+if name == "main":
+print(process_data())
