@@ -1,0 +1,66 @@
+import pandas as pd
+import re
+from tqdm import tqdm
+from pathlib import Path
+
+
+def extract_and_process_data(input_file, output_file):
+    # Read the input CSV file
+    df = pd.read_csv(input_file)
+
+    # Initialize the output DataFrame
+    output_df = pd.DataFrame()
+
+    # Extract and rename basic columns
+    base_columns = {
+        'id': 'AVERAGE_id',
+        'area': 'AVERAGE_area',
+        'rt': 'AVERAGE_rt',
+        'mz': 'AVERAGE_mz',
+        'height': 'AVERAGE_height'
+    }
+
+    for orig, new in base_columns.items():
+        if orig in df.columns:
+            output_df[new] = df[orig]
+
+    # Identify and extract time-point-specific columns based on naming pattern
+    pattern = re.compile(r'-(\d+)H.*?:(area|rt|mz|height)$')
+    extracted_columns = {}
+
+    # Scan columns with progress bar
+    for col in tqdm(df.columns, desc="Processing columns"):
+        match = pattern.search(col)
+        if match:
+            hours = int(match.group(1))
+            metric = match.group(2)
+            new_col_name = f"{hours}HNEG_{metric}"
+            extracted_columns[hours] = extracted_columns.get(hours, {}) | {metric: col}
+            output_df[new_col_name] = df[col]
+
+    # Sort columns by time point
+    sorted_hours = sorted(extracted_columns.keys())
+    final_columns = list(output_df.columns[:len(base_columns)])
+
+    # Append time-point-specific columns in a consistent order
+    for hour in sorted_hours:
+        for metric in ['area', 'rt', 'mz', 'height']:
+            col_name = f"{hour}HNEG_{metric}"
+            if col_name in output_df.columns:
+                final_columns.append(col_name)
+
+    # Reorder columns
+    output_df = output_df[final_columns]
+
+    # Save the processed result
+    output_df.to_csv(output_file, index=False)
+    print(f"\nProcessing complete. Output saved to: {output_file}")
+
+
+# === Example usage with anonymized paths ===
+if __name__ == "__main__":
+    input_file = Path("./input/sample_input.csv")  # Anonymized input path
+    output_file = Path("./output/sample_input_processed.csv")  # Anonymized output path
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)  # Ensure output folder exists
+    extract_and_process_data(input_file, output_file)
