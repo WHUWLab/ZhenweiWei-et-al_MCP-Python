@@ -1,0 +1,137 @@
+import os
+import pandas as pd
+import numpy as np
+from scipy.spatial.distance import cosine
+from tqdm import tqdm
+
+# Path configuration (anonymized)
+theo_folder = "./theoretical_spectra"
+exp_folder = "./input_experimental"
+out_folder = "./output_matched"
+os.makedirs(out_folder, exist_ok=True)
+
+# Utility: Calculate ppm error
+def ppm_error(exp_mz, theo_mz):
+    return abs(exp_mz - theo_mz) / theo_mz * 1e6
+
+# Extract theoretical fragment ions
+def extract_theoretical_fragments(row):
+    mzs, intensities = [], []
+    for i in range(1, 100):
+        mz = row.get(f"mz_{i}")
+        intensity = row.get(f"intensity_{i}")
+        if pd.notnull(mz) and pd.notnull(intensity):
+            mzs.append(mz)
+            intensities.append(intensity)
+    return np.array(mzs), np.array(intensities)
+
+# Extract experimental fragment ions
+def extract_experimental_fragments(row):
+    mzs, intensities = [], []
+    for i in range(1, 200):
+        mz = row.get(f"PRODMASS_{i} m/z")
+        intensity = row.get(f"PRODMASS_{i} NORMALIZED")
+        if pd.notnull(mz) and pd.notnull(intensity):
+            mzs.append(mz)
+            intensities.append(intensity)
+    return np.array(mzs), np.array(intensities)
+
+# Compute cosine similarity with concatenated m/z and intensity
+def cosine_similarity_with_mz(exp_mz, exp_intensity, theo_mz, theo_intensity):
+    try:
+        exp_vector = np.concatenate([
+            exp_mz / np.linalg.norm(exp_mz), 
+            exp_intensity / np.linalg.norm(exp_intensity)
+        ])
+        theo_vector = np.concatenate([
+            theo_mz / np.linalg.norm(theo_mz), 
+            theo_intensity / np.linalg.norm(theo_intensity)
+        ])
+        return 1 - cosine(exp_vector, theo_vector)
+    except:
+        return -1
+
+# Main loop: match experimental MS/MS data with theoretical spectra
+for exp_file in os.listdir(exp_folder):
+    if not exp_file.endswith(".csv"):
+        continue
+
+    exp_path = os.path.join(exp_folder, exp_file)
+    df_exp = pd.read_csv(exp_path)
+    exp_name = os.path.splitext(exp_file)[0]
+
+    # Identify matching theoretical files
+    theo_prefix = exp_name + "-HMDB-MATCHED_MSII_MATCHED_"
+    matched_theo_files = [f for f in os.listdir(theo_folder)
+                          if f.startswith(theo_prefix) and f.endswith(".csv")]
+
+    # Process each matched theoretical file
+    for theo_file in matched_theo_files:
+        theo_path = os.path.join(theo_folder, theo_file)
+        df_theo = pd.read_csv(theo_path)
+        theo_name = os.path.splitext(theo_file)[0]
+
+        results = []
+        print(f"Matching: {exp_name} vs {theo_name} ...")
+
+        for _, exp_row in tqdm(df_exp.iterrows(), total=len(df_exp), desc=f"{exp_name}"):
+            exp_pepmass = exp_row.get("PEPMASS")
+            if pd.isnull(exp_pepmass):
+                continue
+
+            exp_mzs, exp_intensities = extract_experimental_fragments(exp_row)
+            best_score = -1
+            best_match = None
+
+            for _, theo_row in df_theo.iterrows():
+                theo_mh = theo_row.get("[M-H]")
+                if pd.isnull(theo_mh) or ppm_error(exp_pepmass, theo_mh) > 30:
+                    continue
+
+                theo_mzs, theo_intensities = extract_theoretical_fragments(theo_row)
+
+                matched_exp_mz, matched_exp_inten = [], []
+                matched_theo_mz, matched_theo_inten = [], []
+
+                for i, exp_mz in enumerate(exp_mzs):
+                    for j, theo_mz in enumerate(theo_mzs):
+                        if ppm_error(exp_mz, theo_mz) <= 30:
+                            matched_exp_mz.append(exp_mz)
+                            matched_exp_inten.append(exp_intensities[i])
+                            matched_theo_mz.append(theo_mz)
+                            matched_theo_inten.append(theo_intensities[j])
+                            break
+
+                if len(matched_exp_mz) >= 2:
+                    score = cosine_similarity_with_mz(
+                        np.array(matched_exp_mz), np.array(matched_exp_inten),
+                        np.array(matched_theo_mz), np.array(matched_theo_inten)
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_match = {
+                            **theo_row[[
+                                "FEATURE_ID", "HMDB_ID", "HMDB_Average_Molecular_Weight",
+                                "[M-H]", "[M]", "RTINMINS", "Formula", "Name",
+                                "CAS_Registry_Number", "Collision_Energy"
+                            ]].to_dict(),
+                            "From_Exp_File": exp_row.get("FEATURE_ID"),
+                            "Cosine_Similarity": score
+                        }
+
+                        for i, (mz, inten) in enumerate(zip(theo_mzs, theo_intensities)):
+                            best_match[f"theo_mz_{i+1}"] = mz
+                            best_match[f"theo_intensity_{i+1}"] = inten
+
+                        for i, (mz, inten) in enumerate(zip(matched_exp_mz, matched_exp_inten)):
+                            best_match[f"matched_PRODMASS_{i+1}_mz"] = mz
+                            best_match[f"matched_PRODMASS_{i+1}_intensity"] = inten
+
+            if best_match:
+                results.append(best_match)
+
+        # Save matching results
+        output_name = f"{exp_name}_vs_{theo_name}_matched.csv"
+        output_path = os.path.join(out_folder, output_name)
+        pd.DataFrame(results).to_csv(output_path, index=False)
+        print(f"Matching complete. Saved to: {output_path}\n")
