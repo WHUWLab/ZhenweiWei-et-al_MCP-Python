@@ -1,0 +1,101 @@
+import pandas as pd
+import numpy as np
+import os
+import re
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+
+# Element accurate masses (monoisotopic)
+element_masses = {'C': 12.0, 'H': 1.007825, 'O': 15.994915, 'N': 14.003074, 'S': 31.972071}
+
+# RDB equivalent values per element
+rdb_equiv = {'C': 1, 'H': -0.5, 'N': 0.5, 'O': 0, 'S': 0}
+
+# Elemental composition ranges
+element_ranges = {
+    'C': range(1, 30),
+    'H': range(1, 60),
+    'O': range(0, 15),
+    'N': range(0, 10),
+    'S': range(0, 10)
+}
+
+# Parameters
+ppm_tol = 20                    # PPM tolerance
+H_mass = 1.007825               # Hydrogen mass
+min_rdb = -1.0                  # Minimum RDB
+max_rdb = 100.0                 # Maximum RDB
+
+def calc_mass(formula):
+    """Calculate exact mass based on elemental composition."""
+    return sum(count * element_masses[elem] for elem, count in formula.items())
+
+def calc_rdb(formula):
+    """Calculate RDB value with correction and limits."""
+    rdb = sum(count * rdb_equiv[elem] for elem, count in formula.items()) + 1
+    return max(min_rdb, min(rdb, max_rdb))
+
+def generate_formulas(mz):
+    """Generate candidate molecular formulas for a given m/z."""
+    adjusted_mz = mz + H_mass
+    matches = []
+
+    for c in element_ranges['C']:
+        for h in element_ranges['H']:
+            for o in element_ranges['O']:
+                for n in element_ranges['N']:
+                    for s in element_ranges['S']:
+                        formula = {'C': c, 'H': h, 'O': o, 'N': n, 'S': s}
+                        mass = calc_mass(formula)
+                        ppm_error = (mass - adjusted_mz) / adjusted_mz * 1e6
+                        rdb = calc_rdb(formula)
+
+                        if (abs(ppm_error) <= ppm_tol and
+                            c >= 1 and h >= 1 and
+                            min_rdb <= rdb <= max_rdb):
+
+                            formula_str = ''.join(f'{k}{v}' for k, v in formula.items() if v > 0)
+                            matches.append((formula_str, rdb, ppm_error))
+
+    matches.sort(key=lambda x: abs(x[2]))
+    return matches[:10]
+
+def process_row(row):
+    """Process a single row of precursor ion and compute top candidate formulas."""
+    mz = row['PEPMASS']
+    result = {
+        'FEATURE_ID': row['FEATURE_ID'],
+        'PEPMASS': mz,
+        'RTINMINS': row['RTINMINS']
+    }
+
+    formulas = generate_formulas(mz)
+    for i, (f_str, rdb, ppm) in enumerate(formulas, 1):
+        result[f'Formula_{i}'] = f_str
+        result[f'RDB_{i}'] = round(rdb, 2)
+        result[f'DeltaPPM_{i}'] = round(ppm, 2)
+
+    return result
+
+def main():
+    input_folder = './input/masslist_csv'
+    output_folder = './output/formula_simulated'
+    os.makedirs(output_folder, exist_ok=True)
+
+    files = [f for f in os.listdir(input_folder) if f.endswith('.csv')]
+
+    for file in files:
+        print(f'Processing: {file}')
+        df = pd.read_csv(os.path.join(input_folder, file))
+        rows = df.to_dict(orient='records')
+
+        with Pool(processes=cpu_count()) as pool:
+            results = list(tqdm(pool.imap(process_row, rows), total=len(rows)))
+
+        output_df = pd.DataFrame(results)
+        output_path = os.path.join(output_folder, file)
+        output_df.to_csv(output_path, index=False)
+        print(f'Saved to: {output_path}')
+
+if __name__ == '__main__':
+    main()
