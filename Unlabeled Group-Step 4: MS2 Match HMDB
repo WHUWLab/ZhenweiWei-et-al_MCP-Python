@@ -1,0 +1,108 @@
+import os
+import csv
+import re
+from tqdm import tqdm
+from collections import defaultdict
+
+
+def standardize_formula(formula):
+    """Standardize molecular formula by alphabetically ordering elements and summing counts."""
+    elements = re.findall(r'([A-Z][a-z]*)(\d*)', formula)
+    element_counts = defaultdict(int)
+
+    for element, count in elements:
+        count = int(count) if count else 1
+        element_counts[element] += count
+
+    sorted_elements = sorted(element_counts.items())
+    standardized = ''.join(f"{elem}{count if count > 1 else ''}" for elem, count in sorted_elements)
+    return standardized
+
+
+def load_hmdb_database(hmdb_folder):
+    """Load HMDB metabolite information from all CSV files in the folder."""
+    hmdb_data = {}
+    pattern = re.compile(r'hmdb_metabolites_(\d+)\.csv')
+
+    for filename in os.listdir(hmdb_folder):
+        match = pattern.match(filename)
+        if match:
+            filepath = os.path.join(hmdb_folder, filename)
+
+            with open(filepath, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    formula = row['Chemical_Formula']
+                    if formula:
+                        std_formula = standardize_formula(formula)
+                        if std_formula not in hmdb_data:
+                            hmdb_data[std_formula] = []
+                        hmdb_data[std_formula].append({
+                            'HMDB_ID': row['HMDB_ID'],
+                            'Name': row['Name'],
+                            'Average_Molecular_Weight': row['Average_Molecular_Weight'],
+                            'CAS_Registry_Number': row['CAS_Registry_Number'],
+                            'Original_Formula': formula
+                        })
+    return hmdb_data
+
+
+def process_input_files(input_folder, hmdb_data, output_folder):
+    """Process input CSV files and match formulas to HMDB database."""
+    os.makedirs(output_folder, exist_ok=True)
+    pattern = re.compile(r'(\w+)_FORMULA\.csv')  # Generic pattern
+
+    for filename in os.listdir(input_folder):
+        match = pattern.match(filename)
+        if match:
+            prefix = match.group(1)
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f'{prefix}_HMDB_MATCHED.csv')
+
+            with open(input_path, 'r', encoding='utf-8') as infile, \
+                 open(output_path, 'w', newline='', encoding='utf-8') as outfile:
+
+                reader = csv.DictReader(infile)
+                fieldnames = ['FEATURE_ID', 'HMDB_ID', 'PEPMASS', 'RTINMINS',
+                              'Formula', 'Name', 'Average_Molecular_Weight', 'CAS_Registry_Number']
+                writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for row in tqdm(reader, desc=f'Processing {filename}'):
+                    formula_columns = [col for col in row if col.startswith('Formula_')]
+
+                    for formula_col in formula_columns:
+                        formula = row[formula_col]
+                        if formula:
+                            std_formula = standardize_formula(formula)
+                            if std_formula in hmdb_data:
+                                for match in hmdb_data[std_formula]:
+                                    writer.writerow({
+                                        'FEATURE_ID': row.get('FEATURE_ID', ''),
+                                        'HMDB_ID': match['HMDB_ID'],
+                                        'PEPMASS': row.get('PEPMASS', ''),
+                                        'RTINMINS': row.get('RTINMINS', ''),
+                                        'Formula': formula,
+                                        'Name': match['Name'],
+                                        'Average_Molecular_Weight': match['Average_Molecular_Weight'],
+                                        'CAS_Registry_Number': match['CAS_Registry_Number']
+                                    })
+
+
+def main():
+    # Anonymized paths
+    input_folder = './input/formula_results'
+    hmdb_folder = './hmdb/csv'
+    output_folder = './output/hmdb_matched'
+
+    print("Loading HMDB database...")
+    hmdb_data = load_hmdb_database(hmdb_folder)
+    print(f"Loaded {len(hmdb_data)} unique standardized formulas.")
+
+    print("Matching input files with HMDB...")
+    process_input_files(input_folder, hmdb_data, output_folder)
+    print("Matching complete. Results saved to:", output_folder)
+
+
+if __name__ == '__main__':
+    main()
