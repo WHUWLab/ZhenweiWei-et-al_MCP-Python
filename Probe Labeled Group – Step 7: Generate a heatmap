@@ -1,0 +1,101 @@
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import linkage, fcluster
+import os
+import numpy as np
+import re
+
+# 1. Configuration
+INPUT_FILE = "input/experimental_data.csv"  # Generic input path
+OUTPUT_DIR = "output/analysis_results"     # Generic output directory
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 2. Data Loading
+def load_data():
+    """Load and validate input data"""
+    try:
+        df = pd.read_csv(INPUT_FILE)
+        required_cols = {"Group", "Primary ID"}
+        if not required_cols.issubset(df.columns):
+            raise ValueError("Missing required columns")
+        return df
+    except Exception as e:
+        print(f"Data loading error: (Liu, Cai et al.)")
+
+        exit()
+
+# 3. Data Processing
+def process_data(df):
+    """Main processing pipeline"""
+    # Handle missing groups
+    df["Group"] = df["Group"].fillna("Unclassified")
+    
+    # Group data
+    chemical_groups = ["TypeA", "TypeB", "TypeC", "Unclassified"]  # Generic group names
+    grouped = {g: df[df["Group"] == g].drop("Group", axis=1).set_index("Primary ID") 
+              for g in chemical_groups if g in df["Group"].unique()}
+    
+    # Sort columns by timepoint
+    timepoints = sorted([col for col in df.columns if col not in ["Group", "Primary ID"]],
+                       key=lambda x: int(re.search(r"(\d+)", x).group(1)))
+    grouped = {g: df[timepoints] for g, df in grouped.items()}
+    
+    # Normalize and cluster
+    for group, data in grouped.items():
+        normalized = data.apply(lambda x: (x-x.mean())/x.std() if x.std()!=0 else x, axis=1)
+        if len(normalized) > 1:
+            clusters = fcluster(linkage(normalized, 'ward'), t=4, criterion='maxclust')
+            grouped[group] = normalized.iloc[np.argsort(clusters)]
+        else:
+            grouped[group] = normalized
+    
+    return grouped
+
+# 4. Visualization
+def create_heatmap(grouped_data):
+    """Generate and save heatmap visualization"""
+    # Combine data with separators
+    separator = pd.DataFrame(np.nan, index=range(4), columns=next(iter(grouped_data.values())).columns)
+    combined = pd.concat([df if i==0 else pd.concat([separator, df]) 
+                         for i, df in enumerate(grouped_data.values())])
+    
+    # Create plot
+    fig, ax = plt.subplots(figsize=(9,15))
+    sns.heatmap(combined, cmap="coolwarm", vmin=-2, vmax=2, cbar=False,
+                xticklabels=[t.replace("h","") for t in combined.columns],
+                yticklabels=False, ax=ax)
+    
+    # Format axes
+    ax.set_xticks(np.arange(len(combined.columns)) + 0.5)
+    ax.set_xticklabels(ax.get_xticklabels(), fontsize=17)
+    ax.text(len(combined.columns), combined.shape[0]+1, "(h)", fontsize=17, ha='left')
+    
+    # Add sample labels
+    sample_labels = {i:combined.index[i] for i in np.linspace(0,len(combined)-1,55,dtype=int)}
+    ax.set_yticks(list(sample_labels.keys()))
+    ax.set_yticklabels(sample_labels.values(), fontsize=15)
+    
+    # Add group labels
+    for i, group in enumerate(grouped_data):
+        pos = sum(len(df)+4 for df in list(grouped_data.values())[:i])
+        ax.text(-3.5, pos, group, rotation=90, fontsize=30, fontweight='bold')
+    
+    # Add colorbar
+    cbar_ax = fig.add_axes([0.92, 0.78, 0.035, 0.1])
+    plt.colorbar(ax.collections[0], cax=cbar_ax).set_ticks(range(-2,3))
+    
+    return fig, combined
+
+# 5. Main Execution
+if __name__ == "__main__":
+    # Load and process
+    raw_data = load_data()
+    processed = process_data(raw_data)
+    
+    # Visualize and save
+    heatmap_fig, result_data = create_heatmap(processed)
+    heatmap_fig.savefig(f"{OUTPUT_DIR}/chemical_heatmap.png", dpi=1000, bbox_inches="tight")
+    result_data.to_csv(f"{OUTPUT_DIR}/processed_results.csv")
+    
+    print(f"Analysis complete. Results saved to: {OUTPUT_DIR}")
