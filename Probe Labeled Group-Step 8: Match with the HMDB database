@@ -1,0 +1,62 @@
+import pandas as pd
+from tqdm import tqdm
+
+# 1. File paths (anonymized)
+input_file1 = "input/processed_formulas.csv"
+input_file2 = "input/hmdb_database.csv"
+output_file = "output/matched_results.csv"
+
+# 2. Data loading
+df_formulas = pd.read_csv(input_file1, encoding='utf-8-sig')
+df_hmdb = pd.read_csv(input_file2, encoding='utf-8-sig')
+
+# 3. Data cleaning
+df_formulas.columns = df_formulas.columns.str.strip()
+
+# 4. Validation check
+if 'Var ID' not in df_formulas.columns:
+    print("Error: Required column 'Var ID' not found")
+    exit()
+
+# 5. Data processing
+results = []
+var_ids = set()
+group_counts = {'TypeA': 0, 'TypeB': 0, 'TypeC': 0}  # Generic group names
+
+for _, row in tqdm(df_formulas.iterrows(), total=len(df_formulas), desc="Processing"):
+    var_id = row['Var ID']
+    group = row['GROUP']
+    
+    var_ids.add(var_id)
+    if group in group_counts:
+        group_counts[group] += 1
+    
+    # Check Formula_1 to Formula_10
+    for i in range(1, 11):
+        formula_col = f'Formula
+        if formula_col in row and pd.notna(row[formula_col]):
+            formula = row[formula_col]
+            matches = df_hmdb[df_hmdb['Chemical Formula'] == formula]
+            
+            for _, match in matches.iterrows():
+                results.append({
+                    'Var ID': var_id,
+                    'Formula': formula,
+                    'HMDB_ID': match['Accession'],
+                    'Compound_Name': match['Name'],
+                    'Molecular_Weight': match['Average Molecular Weight'],
+                    'CAS_Number': match['CAS Registry Number'],
+                    'Observed_mz': row['AVERAGE m/z'],
+                    'Source_ID': row['SOURCE_ID'],
+                    'Group': group,
+                    'Formula_Source': formula_col
+                })
+
+# 6. Save results
+pd.DataFrame(results).to_csv(output_file, index=False)
+
+# 7. Print summary
+print(f"Unique Var IDs: {len(var_ids)}")
+for group, count in group_counts.items():
+    print(f"{group} count: {count}")
+print("Processing completed successfully")
