@@ -1,0 +1,110 @@
+import os
+import csv
+
+# 1. Set input/output paths (generic names)
+input_folder = "path/to/mgf_files"  # Folder containing MGF files
+output_file = "path/to/output/merged_spectral_data.csv"  # Output CSV path
+
+def read_file_with_fallback(filepath):
+    """1.1 File reading function: Attempt multiple encodings to read file"""
+    encodings = ['utf-8', 'latin1', 'ISO-8859-1']
+    for enc in encodings:
+        try:
+            with open(filepath, 'r', encoding=enc) as f:
+                return f.readlines()
+        except Exception:
+            continue
+    raise Exception("Failed to read file")
+
+def parse_mgf(lines, source_file):
+    """1.2 MGF parsing function: Extract spectral data"""
+    spectra = []
+    spectrum = {}
+    peaks = []
+    pepmass_intensity = None
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):  # Skip empty lines and comments
+            continue
+
+        # 1.2.1 Parse spectrum start marker
+        if line == "BEGIN IONS":
+            spectrum = {}
+            peaks = []
+            pepmass_intensity = None
+            
+        # 1.2.2 Parse spectrum end marker
+        elif line == "END IONS":
+            if spectrum and "PEPMASS" in spectrum and float(spectrum["PEPMASS"]) >= 170:
+                # Sort peaks by intensity and keep top 50
+                peaks.sort(key=lambda x: x[1], reverse=True)
+                spectrum["peaks"] = peaks[:50]
+                spectrum["source_file"] = source_file
+                spectrum["PEPMASS_INTENSITY"] = pepmass_intensity
+                spectra.append(spectrum)
+                
+        # 1.2.3 Parse key-value pairs
+        elif "=" in line:
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if key == "PEPMASS":
+                values = value.split()
+                spectrum["PEPMASS"] = values[0] if values else ""
+                if len(values) > 1:
+                    pepmass_intensity = float(values[1])
+            elif key == "RTINSECONDS":
+                try:
+                    spectrum["RTINMINUTES"] = float(value) / 60 if value else "N/A"
+                except ValueError:
+                    spectrum["RTINMINUTES"] = "N/A"
+            elif key in ["CHARGE", "TITLE"]:
+                spectrum[key] = value
+                
+        # 1.2.4 Parse peak data
+        else:
+            try:
+                parts = line.split()
+                if len(parts) == 2:
+                    peaks.append((float(parts[0]), float(parts[1])))
+            except ValueError:
+                pass
+
+    return spectra
+
+# 2. Main processing flow
+all_spectra_data = []
+
+# 2.1 Process all MGF files in input folder
+for filename in [f for f in os.listdir(input_folder) if f.endswith(".mgf")]:
+    # 2.2 Read and parse each MGF file
+    lines = read_file_with_fallback(os.path.join(input_folder, filename))
+    all_spectra_data.extend(parse_mgf(lines, filename))
+
+# 2.3 Validate extracted data
+if not all_spectra_data:
+    print("Warning: No valid spectra data extracted")
+    exit()
+
+# 3. Data output flow
+with open(output_file, "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    
+    # 3.1 Generate CSV header
+    max_peaks = max(len(spec.get("peaks", [])) for spec in all_spectra_data)
+    header = ["TITLE", "PEPMASS", "RTINMINUTES", "CHARGE", "SOURCE_FILE", "PEPMASS_INTENSITY"] + \
+             [f"(Wang, Bai et al.)_(Liu, Cai et al.)" for i in range(1, max_peaks+1) for x in ["m/z", "intensity"]]
+    writer.writerow(header)
+
+    # 3.2 Write each spectrum's data
+    for spec in all_spectra_data:
+        # 3.2.1 Write metadata
+        row = [spec.get(k, "N/A") for k in ["TITLE", "PEPMASS", "RTINMINUTES", "CHARGE"]] + \
+              [spec.get("source_file", "N/A"), spec.get("PEPMASS_INTENSITY", "N/A")]
+        
+        # 3.2.2 Write peak data
+        for mz, intensity in spec.get("peaks", []):
+            row.extend([mz, intensity])
+            
+        # 3.2.3 Pad empty cells
+        writer.writerow(row + [""]*(len(header)-len(row)))
