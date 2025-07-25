@@ -1,0 +1,96 @@
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+
+# Generic file paths
+file_de_msi = 'path/to/input1.csv'  # Only parent ion info
+file_msii = 'path/to/input2.csv'    # Parent + fragment ions
+output_file = 'path/to/output.csv'
+
+# Read CSV data
+df_de_msi = pd.read_csv(file_de_msi)
+df_msii = pd.read_csv(file_msii)
+
+# Process column names (remove spaces)
+df_de_msi.columns = df_de_msi.columns.str.strip()
+df_msii.columns = df_msii.columns.str.strip()
+
+# Fragment ion columns (max 50)
+max_ions = 50
+mz_cols = [f'm/z_(Liu, Cai et al.)' for i in range(1, max_ions + 1)]
+
+intensity_cols = [f'intensity_(Liu, Cai et al.)' for i in range(1, max_ions + 1)]
+
+
+# Check required columns
+peak_height_exists = 'Peak Height' in df_de_msi.columns
+source_file_exists = 'Source File' in df_de_msi.columns
+
+# Store matched results
+matched_results = []
+
+# Matching process with progress bar
+for _, row in tqdm(df_de_msi.iterrows(), total=len(df_de_msi), desc="Matching"):
+    row_mz = row['row m/z']
+    row_rt = row['row retention time']
+    
+    peak_height = row['Peak Height'] if peak_height_exists else ''
+    source_file = row['Source File'] if source_file_exists else ''
+
+    # Find matching rows (0.001 m/z tolerance, 0.1 min RT tolerance)
+    matching_rows = df_msii[
+        (np.abs(df_msii['PEPMASS'] - row_mz) <= 0.001) &
+        (np.abs(df_msii['RTINMINUTES'] - row_rt) <= 0.1)
+        ]
+
+    # Process matches
+    for _, match in matching_rows.iterrows():
+        result_row = {
+            'PEPMASS': match['PEPMASS'],
+            'row m/z': row_mz,
+            'row retention time': row_rt,
+            'Peak Height': peak_height,
+            'Source File': source_file
+        }
+
+        # Add fragment ions (up to 50)
+        for mz_col, intensity_col in zip(mz_cols, intensity_cols):
+            result_row[mz_col] = match.get(mz_col, '')
+            result_row[intensity_col] = match.get(intensity_col, '')
+
+        matched_results.append(result_row)
+
+# Convert to DataFrame
+matched_df = pd.DataFrame(matched_results)
+
+# Deduplication (keep highest Peak Height)
+matched_df.sort_values(
+    by=['row m/z', 'row retention time', 'Peak Height'], 
+    ascending=[True, True, False], 
+    inplace=True
+)
+
+# Final filtering
+final_results = []
+last_mz = last_rt = last_height = None
+
+for _, row in matched_df.iterrows():
+    current_mz = row['row m/z']
+    current_rt = row['row retention time']
+    current_height = row['Peak Height']
+
+    if (last_mz is not None and 
+        abs(current_mz - last_mz) <= 0.001 and 
+        abs(current_rt - last_rt) <= 0.1):
+        if current_height > last_height:
+            final_results[-1] = row
+        continue
+
+    final_results.append(row)
+    last_mz, last_rt, last_height = current_mz, current_rt, current_height
+
+# Save results
+final_df = pd.DataFrame(final_results)
+final_df.to_csv(output_file, index=False, na_rep='')
+
+print(f"Processing complete. Results saved to: {output_file}")
