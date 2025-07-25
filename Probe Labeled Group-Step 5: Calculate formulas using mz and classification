@@ -1,0 +1,98 @@
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+import re
+
+# Element masses (atomic weights)
+element_masses = {
+    'C': 12.0,
+    'N': 14.003,
+    'O': 15.995,
+    'H': 1.008,
+    'B': 11.009,
+    'S': 31.972
+}
+
+# Electron mass
+electron_mass = 0.00054858
+
+# Element count limits
+element_limits = {
+    'C': (7, 35),
+    'N': (1, 10),
+    'O': (3, 15),
+    'B': (1, 1),
+    'S': (0, 10),
+    'H': (0, 65)
+}
+
+# Read input file
+input_file = "path/to/input_data.csv"
+df = pd.read_csv(input_file)
+
+def calculate_formula(mz, charge=1, tolerance_ppm=20):
+    """Calculate possible chemical formulas for given m/z"""
+    formulas = []
+    for c in tqdm(range(element_limits['C'][0], element_limits['C'][1] + 1), 
+                 desc=f"Calculating for mz={mz:.4f}"):
+        for n in range(element_limits['N'][0], element_limits['N'][1] + 1):
+            for o in range(element_limits['O'][0], element_limits['O'][1] + 1):
+                for b in range(element_limits['B'][0], element_limits['B'][1] + 1):
+                    for s in range(element_limits['S'][0], element_limits['S'][1] + 1):
+                        for h in range(element_limits['H'][0], element_limits['H'][1] + 1):
+                            total_mass = (c * element_masses['C'] +
+                                        n * element_masses['N'] +
+                                        o * element_masses['O'] +
+                                        b * element_masses['B'] +
+                                        s * element_masses['S'] +
+                                        h * element_masses['H'])
+                            if charge == 1:
+                                total_mass -= electron_mass
+                            if abs(total_mass - mz) / mz * 1e6 <= tolerance_ppm:
+                                formula_parts = []
+                                if c > 0: formula_parts.append(f"C(Liu, Cai et al.)")
+
+                                if h > 0: formula_parts.append(f"H(Liu, Cai et al.)")
+
+                                if n > 0: formula_parts.append(f"N(Liu, Cai et al.)")
+
+                                if o > 0: formula_parts.append(f"O(Liu, Cai et al.)")
+
+                                if s > 0: formula_parts.append(f"S{s}")
+                                if b > 0: formula_parts.append(f"B(Liu, Cai et al.)")
+
+                                formulas.append("".join(formula_parts))
+    return formulas
+
+def filter_formulas(formulas):
+    """Filter formulas based on RDB rules"""
+    filtered = []
+    for formula in formulas:
+        c = int(re.search(r'C(\d+)', formula).group(1)) if 'C' in formula else 0
+        h = int(re.search(r'H(\d+)', formula).group(1)) if 'H' in formula else 0
+        n = int(re.search(r'N(\d+)', formula).group(1)) if 'N' in formula else 0
+        o = int(re.search(r'O(\d+)', formula).group(1)) if 'O' in formula else 0
+        s = int(re.search(r'S(\d+)', formula).group(1)) if 'S' in formula else 0
+        b = int(re.search(r'B(\d+)', formula).group(1)) if 'B' in formula else 0
+        
+        rdb = c - h/2 + n/2 + 1  # Ring and double bond equivalent
+        if 4 <= rdb <= 100:
+            filtered.append(formula)
+    return filtered
+
+# Main processing
+results = []
+for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing rows"):
+    mz = row['AVERAGE mz']
+    formulas = calculate_formula(mz, charge=1)
+    filtered = filter_formulas(formulas)
+    
+    result = row.to_dict()
+    for i, formula in enumerate(filtered):
+        result[f'Formula_{i+1}'] = formula
+    results.append(result)
+
+# Save results
+output_path = "path/to/output_formulas.csv"
+pd.DataFrame(results).to_csv(output_path, index=False)
+print(f"Results saved to {output_path}")
