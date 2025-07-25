@@ -1,0 +1,116 @@
+import pandas as pd
+import re
+
+# Define subtraction rules for different groups
+SUBTRACTION_RULES = {
+    "COOH": {"C": 8, "H": 11, "B": 1, "N": 1, "O": 1, "S": 0},
+    "NH": {"C": 7, "H": 6, "B": 1, "N": 0, "O": 3, "S": 0},
+    "SH": {"C": 17, "H": 22, "B": 1, "N": 2, "O": 5, "S": 0}
+}
+
+# Minimum element requirements for each group
+GROUP_MIN_ELEMENTS = {
+    "COOH": {"C": 2, "H": 2, "O": 2},
+    "SH": {"C": 1, "H": 2, "S": 1},
+    "NH": {"C": 1, "H": 2, "N": 1}
+}
+
+def parse_formula(formula):
+    """Parse chemical formula into element counts dictionary"""
+    if not formula or pd.isna(formula):
+        return {}
+    elements = re.findall(r'([A-Z][a-z]?)(\d*)', formula)
+    return {elem: int(cnt) if cnt else 1 for elem, cnt in elements}
+
+def build_formula(elements):
+    """Build formula string from element counts"""
+    return ''.join(f"{elem}{cnt if cnt > 1 else ''}" 
+                  for elem, cnt in sorted(elements.items()) 
+                  if cnt > 0)
+
+def subtract_elements(formula_dict, group):
+    """Subtract elements based on group rules"""
+    if group not in SUBTRACTION_RULES:
+        return formula_dict
+    
+    subtracted = formula_dict.copy()
+    for elem, cnt in SUBTRACTION_RULES[group].items():
+        subtracted[elem] = subtracted.get(elem, 0) - cnt
+    return subtracted
+
+def validate_formula(formula_dict, group):
+    """Validate formula against chemical rules"""
+    if not formula_dict:
+        return False
+    
+    # Check all elements have positive counts
+    if any(v <= 0 for v in formula_dict.values()):
+        return False
+    
+    # Check group minimum requirements
+    if group in GROUP_MIN_ELEMENTS:
+        min_req = GROUP_MIN_ELEMENTS[group]
+        if any(formula_dict.get(e, 0) < min_req[e] for e in min_req):
+            return False
+    
+    # Check N/O/S <= C
+    c_count = formula_dict.get('C', 0)
+    for elem in ['N', 'O', 'S']:
+        if formula_dict.get(elem, 0) > c_count:
+            return False
+            
+    return True
+
+def process_formula_columns(row):
+    """Process all formula columns for a row"""
+    group = row["GROUP"]
+    formula_cols = [c for c in row.index if c.startswith("Formula_")]
+    
+    # Process and validate formulas
+    valid_formulas = set()
+    for col in formula_cols:
+        formula = row[col]
+        if not formula or pd.isna(formula):
+            continue
+            
+        parsed = parse_formula(formula)
+        subtracted = subtract_elements(parsed, group)
+        if validate_formula(subtracted, group):
+            valid_formulas.add(build_formula(subtracted))
+    
+    # Update formula columns
+    formulas = sorted(valid_formulas)
+    for i, col in enumerate(formula_cols):
+        row[col] = formulas[i] if i < len(formulas) else ""
+    
+    return row
+
+def clean_dataframe(df):
+    """Clean and reorganize the dataframe"""
+    # Process all rows
+    df = df.apply(process_formula_columns, axis=1)
+    
+    # Remove rows with no valid formulas
+    formula_cols = [c for c in df.columns if c.startswith("Formula_")]
+    df = df[df[formula_cols].ne("").any(axis=1)]
+    
+    # Remove empty formula columns
+    non_empty_cols = [c for c in formula_cols if df[c].ne("").any()]
+    keep_cols = [c for c in df.columns if not c.startswith("Formula_")] + non_empty_cols
+    df = df[keep_cols]
+    
+    # Rename formula columns sequentially
+    df.columns = [f"Formula_{i+1}" if c.startswith("Formula_") else c 
+                 for i, c in enumerate(df.columns)]
+    
+    return df
+
+# Main processing
+input_path = "path/to/input_formulas.csv"
+output_path = "path/to/processed_formulas.csv"
+
+df = pd.read_csv(input_path)
+processed_df = clean_dataframe(df)
+processed_df.to_csv(output_path, index=False)
+
+print(f"Processed data saved to {output_path}")
